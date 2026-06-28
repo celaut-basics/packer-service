@@ -36,13 +36,6 @@ ENV NODO_DIR=/opt/nodo \
     # sides serialize identically and reproducibly.
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
-# nodo resolves its docker tooling under NODO_ROOT (=/opt/nodo): bin/docker,
-# bin/dockerd, libexec/docker/cli-plugins/docker-buildx, and the socket at
-# docker/docker.sock — and RAISES if they're missing. Place the static engine
-# binaries exactly there.
-COPY --from=dind /usr/local/bin/ /opt/nodo/bin/
-COPY --from=dind /usr/local/libexec/ /opt/nodo/libexec/
-
 # DinD runtime support tools (glibc side): iptables/iproute2 for networking,
 # kmod for modprobe, e2fsprogs/xfsprogs for storage, pigz/xz for layer (de)compress.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -53,6 +46,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Vendor the nodo tree (packer + its src.utils / protos / bee_rpc deps).
 RUN git clone --depth 1 --branch "${NODO_REF}" \
         https://github.com/celaut-project/nodo.git "${NODO_DIR}"
+
+# nodo resolves its docker tooling under NODO_ROOT (=/opt/nodo): bin/docker,
+# bin/dockerd, libexec/docker/cli-plugins/docker-buildx, and the socket at
+# docker/docker.sock — and RAISES if they're missing. Place the static engine
+# binaries exactly there (after the clone, so the target dir merges cleanly).
+COPY --from=dind /usr/local/bin/ /opt/nodo/bin/
+COPY --from=dind /usr/local/libexec/ /opt/nodo/libexec/
 
 # Determinism patches (REQUIRED so this service's ids match `nodo pack` on a
 # patched node, and so packing the same project twice yields the same id).
@@ -87,10 +87,17 @@ RUN pip3 install --no-cache-dir \
         "protobuf==4.23.3" "grpcio" \
         "docker==6.1.3" requests requests-unixsocket "PyYAML==6.0.1" \
         "python-dotenv==1.0.0" psutil netifaces2 tabulate packaging \
-        typing_extensions six \
+        typing_extensions six mnemonic \
     && pip3 install --no-cache-dir --no-deps \
         "git+https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-py@7a2a344bc29546328bcf2f753dc2407f2c226376" \
     && python3 -c "from bee_rpc import client; import google.protobuf; from google.protobuf.internal import api_implementation as a; assert a.Type()=='python', 'expected pure-python protobuf, got '+a.Type(); print('deps ok, protobuf', google.protobuf.__version__, a.Type())"
+
+# Packer config. The vendored ConfigManager loads "config.yaml" relative to the
+# worker's cwd (=NODO_DIR), and RAISES if absent; it also drives the SERVICE-ID
+# (hash spec = sha3_256, MIN_BUFFER_BLOCK_SIZE = 10MB, packer arch support). This
+# is the node's own config, sanitized (no ledgers/secrets/token) and re-pathed to
+# /opt/nodo, so the service packs byte-identically to `nodo pack`.
+COPY ./packer-config.yaml /opt/nodo/config.yaml
 
 # --- Application --------------------------------------------------------------
 WORKDIR /app
