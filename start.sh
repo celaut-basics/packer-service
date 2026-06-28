@@ -53,6 +53,8 @@ start_dockerd() {
       --bridge=none \
       --iptables=false \
       --ip6tables=false \
+      --dns=1.1.1.1 \
+      --dns=8.8.8.8 \
       --storage-driver="${storage_driver}" \
       >/var/log/dockerd.log 2>&1 &
 }
