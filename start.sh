@@ -50,6 +50,9 @@ start_dockerd() {
       --data-root="${NODO_DIR}/docker/data" \
       --exec-root="${NODO_DIR}/docker/exec" \
       --pidfile="${NODO_DIR}/docker/docker.pid" \
+      --bridge=none \
+      --iptables=false \
+      --ip6tables=false \
       --storage-driver="${storage_driver}" \
       >/var/log/dockerd.log 2>&1 &
 }
