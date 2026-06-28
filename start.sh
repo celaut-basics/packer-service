@@ -19,14 +19,21 @@ export MIN_BUFFER_BLOCK_SIZE="${MIN_BUFFER_BLOCK_SIZE:-1048576}"
 export SAVE_ALL="${SAVE_ALL:-False}"
 export MAIN_DIR="${NODO_DIR}"
 export PYTHONPATH="${NODO_DIR}:${PYTHONPATH}"
+# Force pure-python protobuf so the xattrs map serializes in the same byte order
+# as the node packer (which is also pinned to pure-python) -> matching service-id.
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python"
 # Build with the host-network builder so buildx egress uses the VM's (*) channel.
 export BUILDX_BUILDER="${BUILDX_BUILDER:-nodo-hostnet}"
 
 mkdir -p "$CACHE" "$BLOCKDIR"
 
 echo "[start] booting in-VM dockerd..."
-# docker:dind ships dockerd-entrypoint.sh which sets up storage + iptables.
-dockerd-entrypoint.sh dockerd >/var/log/dockerd.log 2>&1 &
+# docker:dind ships dockerd-entrypoint.sh which sets up cgroups + iptables.
+# --storage-driver=vfs: overlay2 frequently can't mount inside a cloud-hypervisor
+# microVM's root fs; vfs always works (slower/heavier but correct). This is the
+# canonical DinD-in-constrained-env setting.
+DOCKERD_ARGS="${DOCKERD_ARGS:---storage-driver=vfs}"
+dockerd-entrypoint.sh dockerd ${DOCKERD_ARGS} >/var/log/dockerd.log 2>&1 &
 
 # Wait for the daemon socket to come up before packing.
 tries=0

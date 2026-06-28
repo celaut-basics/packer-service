@@ -17,7 +17,14 @@ FROM docker:27-dind
 ARG NODO_REF=stable
 ENV NODO_DIR=/opt/nodo \
     PYTHONUNBUFFERED=1 \
-    PIP_BREAK_SYSTEM_PACKAGES=1
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    # Force pure-python protobuf. protobuf 4.x's default C backend (upb) has no
+    # musllinux wheel here, so `import google._upb` fails on Alpine. More
+    # importantly: protobuf MAP fields (the filesystem xattrs) serialize in a
+    # DIFFERENT byte order under upb vs pure-python, which would change the
+    # service-id. The node packer is pinned to pure-python too (pack_zip injects
+    # this env into its worker), so both sides serialize identically.
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # NOTE: docker:27-dind's baked python3.12 (3.12.13-r0) was built against a
 # NEWER expat than the Alpine v3.21 repo currently ships: its pyexpat.so
@@ -81,7 +88,7 @@ RUN pip3 install --no-cache-dir \
         typing_extensions six \
     && pip3 install --no-cache-dir --no-deps \
         "git+https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-py@7a2a344bc29546328bcf2f753dc2407f2c226376" \
-    && python3 -c "from bee_rpc import client; import google.protobuf; print('deps ok, protobuf', google.protobuf.__version__)"
+    && python3 -c "from bee_rpc import client; import google.protobuf; from google.protobuf.internal import api_implementation as a; assert a.Type()=='python', 'expected pure-python protobuf, got '+a.Type(); print('deps ok, protobuf', google.protobuf.__version__, a.Type())"
 
 # --- Application --------------------------------------------------------------
 WORKDIR /app
