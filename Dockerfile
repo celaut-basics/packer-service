@@ -40,7 +40,7 @@ ENV NODO_DIR=/opt/nodo \
 # kmod for modprobe, e2fsprogs/xfsprogs for storage, pigz/xz for layer (de)compress.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev build-essential git ca-certificates \
-        unzip zip \
+        unzip zip curl \
         iptables iproute2 kmod e2fsprogs xfsprogs pigz xz-utils openssl uidmap \
     && rm -rf /var/lib/apt/lists/*
 
@@ -99,6 +99,23 @@ RUN pip3 install --no-cache-dir \
 # is the node's own config, sanitized (no ledgers/secrets/token) and re-pathed to
 # /opt/nodo, so the service packs byte-identically to `nodo pack`.
 COPY ./packer-config.yaml /opt/nodo/config.yaml
+
+# --- Browser IDE (code-server) ------------------------------------------------
+# A full VS Code in the browser, served on :8443 alongside the packer API. Users
+# pick a language template, edit, and pack — all inside this sealed microVM.
+# code-server is a glibc binary; the standalone install works on debian.
+ARG CODE_SERVER_VERSION=4.91.1
+RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version "${CODE_SERVER_VERSION}" \
+    && code-server --version
+
+# IDE assets: the always-bundled config guide, language templates, the seed
+# workspace (START_HERE + VS Code template-picker task), and the helper CLIs
+# (new-service / pack-service) placed on PATH for the IDE terminal.
+COPY ./ide/SERVICE_CONFIG_GUIDE.md /opt/ide/SERVICE_CONFIG_GUIDE.md
+COPY ./ide/templates /opt/ide/templates
+COPY ./ide/workspace /opt/ide/workspace
+COPY ./ide/bin/new-service ./ide/bin/pack-service /usr/local/bin/
+RUN chmod +x /usr/local/bin/new-service /usr/local/bin/pack-service
 
 # --- Application --------------------------------------------------------------
 WORKDIR /app

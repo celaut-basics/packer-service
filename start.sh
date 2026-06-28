@@ -102,5 +102,42 @@ fi
 docker buildx inspect "$BUILDX_BUILDER" --bootstrap >/dev/null 2>&1 || true
 echo "[start] buildx builder '$BUILDX_BUILDER' ready."
 
+# --- Browser IDE (code-server) ------------------------------------------------
+# Serve a full VS Code on :8443 so users can pick a language template, edit, and
+# pack inside this same microVM. Access is mediated by the nodo network/DNAT
+# layer, so code-server runs with auth disabled.
+export WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
+export TEMPLATES_DIR="${TEMPLATES_DIR:-/opt/ide/templates}"
+export SERVICE_GUIDE="${SERVICE_GUIDE:-/opt/ide/SERVICE_CONFIG_GUIDE.md}"
+export PACKER_URL="${PACKER_URL:-http://127.0.0.1:8080}"
+IDE_PORT="${IDE_PORT:-8443}"
+
+# Seed the workspace once (no-clobber, so user edits survive a microVM restart).
+mkdir -p "$WORKSPACE_DIR"
+cp -rn /opt/ide/workspace/. "$WORKSPACE_DIR"/ 2>/dev/null || true
+mkdir -p "$WORKSPACE_DIR/templates"
+cp -rn "$TEMPLATES_DIR"/. "$WORKSPACE_DIR/templates"/ 2>/dev/null || true
+# The configuration guide is ALWAYS present: refreshed at the workspace root and
+# alongside every reference template.
+if [ -f "$SERVICE_GUIDE" ]; then
+  cp -f "$SERVICE_GUIDE" "$WORKSPACE_DIR/SERVICE_CONFIG_GUIDE.md" || true
+  for d in "$WORKSPACE_DIR"/templates/*/; do
+    [ -d "$d" ] && cp -f "$SERVICE_GUIDE" "${d}SERVICE_CONFIG_GUIDE.md" || true
+  done
+fi
+
+if command -v code-server >/dev/null 2>&1; then
+  echo "[start] launching code-server (VS Code Web) on :${IDE_PORT}"
+  code-server \
+    --bind-addr "0.0.0.0:${IDE_PORT}" \
+    --auth none \
+    --disable-telemetry \
+    --disable-update-check \
+    "$WORKSPACE_DIR" \
+    >/var/log/code-server.log 2>&1 &
+else
+  echo "[start] WARNING: code-server not installed; IDE on :${IDE_PORT} disabled." >&2
+fi
+
 echo "[start] launching packer HTTP server on :8080"
 exec python3 /app/server.py

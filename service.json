@@ -1,5 +1,5 @@
 {
-  "tag": ["celaut-packer-service", "packer", "v0.1.0"],
+  "tag": ["celaut-packer-service", "packer", "ide", "v0.2.0"],
   "architecture": "linux/amd64",
   "init": {
     "entry_path": ["app", "start.sh"]
@@ -7,6 +7,11 @@
   "api": [
     {
       "port": 8080,
+      "transport": ["tcp"],
+      "protocol": ["http"]
+    },
+    {
+      "port": 8443,
       "transport": ["tcp"],
       "protocol": ["http"]
     }

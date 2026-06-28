@@ -50,6 +50,15 @@ os.environ.setdefault("CACHE", "/var/lib/celaut/cache/")
 os.environ.setdefault("BLOCKDIR", "/var/lib/celaut/blocks/")
 
 
+def _has_config(project: str, name: str) -> bool:
+    """A required config file (service.json / Dockerfile) may sit at the project
+    root (Option 2) or under .service/ (Option 1, the recommended layout). The
+    vendored nodo packer's prepare_directory honours both, so accept either."""
+    return os.path.exists(os.path.join(project, name)) or os.path.exists(
+        os.path.join(project, ".service", name)
+    )
+
+
 def _flatten_single_root(extract_dir: str) -> str:
     """If the zip wrapped everything in one top-level folder, descend into it so
     the packer finds service.json/Dockerfile at `path`. Mirrors how `nodo pack`
@@ -57,7 +66,7 @@ def _flatten_single_root(extract_dir: str) -> str:
     entries = [e for e in os.listdir(extract_dir) if not e.startswith("__MACOSX")]
     if len(entries) == 1:
         only = os.path.join(extract_dir, entries[0])
-        if os.path.isdir(only) and os.path.exists(os.path.join(only, "service.json")):
+        if os.path.isdir(only) and _has_config(only, "service.json"):
             return only + "/"
     return extract_dir.rstrip("/") + "/"
 
@@ -168,10 +177,10 @@ class Handler(BaseHTTPRequestHandler):
             with zipfile.ZipFile(zip_path) as zf:
                 zf.extractall(extract_dir)
             project = _flatten_single_root(extract_dir)
-            if not os.path.exists(os.path.join(project, "service.json")):
-                return self._send(400, "zip missing service.json at root")
-            if not os.path.exists(os.path.join(project, "Dockerfile")):
-                return self._send(400, "zip missing Dockerfile at root")
+            if not _has_config(project, "service.json"):
+                return self._send(400, "zip missing service.json (root or .service/)")
+            if not _has_config(project, "Dockerfile"):
+                return self._send(400, "zip missing Dockerfile (root or .service/)")
 
             # Re-zip the (possibly flattened) project for the worker, which unzips
             # to its own cache. Mirrors nodo's zipfile_ok contract.

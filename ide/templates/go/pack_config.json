@@ -1,0 +1,4 @@
+{
+    "include": ["src", "start.sh", ".service/pack_config.json"],
+    "ignore": ["*.md", ".env", "tests/"]
+}

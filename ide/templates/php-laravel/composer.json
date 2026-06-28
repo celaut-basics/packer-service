@@ -1,0 +1,10 @@
+{
+    "name": "example/my-laravel-service",
+    "type": "project",
+    "require": {
+        "php": ">=8.3"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}

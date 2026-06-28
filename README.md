@@ -11,6 +11,10 @@ It is a thin wrapper around the *real* nodo packer
 vendored into the image — not a re-implementation — so the `service_id` it emits
 is byte-identical to `nodo pack`.
 
+Since **v0.2.0** the same microVM also serves a **browser VS Code** on `:8443`
+(see [Browser IDE](#browser-ide-code-server)) so users can pick a language
+template, edit, and pack a service end-to-end without any local toolchain.
+
 ## API
 
 Bound on `0.0.0.0:8080` (declared in `service.json`).
@@ -63,6 +67,42 @@ bee_rpc.read_multiblock_directory(service_dir) → bytes  →  <id>.celaut.bee
 builder, then runs `server.py`. **This is why the service declares
 `network: tag=(*)`** — buildx must reach arbitrary container registries to pull
 the base images referenced by the Dockerfile being packed.
+
+## Browser IDE (code-server)
+
+The image also installs **code-server** (VS Code in the browser), served on the
+second api slot `:8443`. `start.sh` seeds a `/workspace` and launches it
+(`--auth none`; access is mediated by the nodo network/DNAT layer) before
+handing the foreground to the packer server.
+
+The workspace ships everything needed to build a Celaut service:
+
+- **`START_HERE.md`** — the landing guide.
+- **`SERVICE_CONFIG_GUIDE.md`** — the full upstream configuration reference
+  ([zip_with_dockerfile README](https://github.com/celaut-project/nodo/blob/stable/src/commands/packer/zip_with_dockerfile/README.md)),
+  always bundled at the workspace root and inside every service you create.
+- **`templates/<lang>/`** — 8 preconfigured language templates, each with a
+  ready `.service` config (`Dockerfile` + `service.json` + `pack_config.json`),
+  a `start.sh`, and minimal buildable source:
+  `python`, `go`, `rust`, `node-express`, `node-typescript`, `java-spring`,
+  `java-gradle`, `php-laravel`.
+- **`.vscode/tasks.json`** — a *New service from template* task that pops a
+  language picker, plus a *Pack this service* task.
+
+Two helper CLIs are on `PATH` in the IDE terminal:
+
+| Command | What |
+|---|---|
+| `new-service <lang> [name]` | Scaffold a template into the workspace (and drop the config guide inside it). |
+| `pack-service [dir]` | Zip a project and `POST` it to the local packer (`:8080`), saving `<service-id>.celaut.bee` next to it. |
+
+So the full loop — **pick a template → edit → pack → get a `.celaut.bee`** —
+happens inside one sealed microVM.
+
+| Port | Service |
+|---|---|
+| `8080` | Packer HTTP API (`/health`, `/pack`) |
+| `8443` | code-server (browser VS Code) |
 
 ## Bootstrap / dogfood test
 
