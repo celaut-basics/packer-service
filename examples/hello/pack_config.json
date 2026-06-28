@@ -1,1 +1,1 @@
-{ "ignore": [".git/", "*.md", "*.bee"] }
+{ "ignore": [".git/", "target/", "Cargo.lock", "*.md", "*.bee"] }
