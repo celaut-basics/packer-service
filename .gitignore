@@ -1,0 +1,6 @@
+*.celaut.bee
+*.bee
+*.zip
+__pycache__/
+*.pyc
+.DS_Store
