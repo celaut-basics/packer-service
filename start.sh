@@ -4,8 +4,8 @@
 # by the packer that builds THIS image.
 #
 # Sequence:
-#   1. Boot an in-VM Docker daemon (docker-in-docker) on the socket nodo expects
-#      (NODO_ROOT/docker/docker.sock), with the vfs storage driver.
+#   1. Boot a native Docker daemon inside the cloud-hypervisor guest, on the
+#      socket nodo expects (NODO_ROOT/docker/docker.sock).
 #   2. Create a host-network buildx builder under nodo's DOCKER_CONFIG so the
 #      vendored packer worker (which shells out to `docker buildx build
 #      --builder nodo-hostnet`) finds it.
@@ -38,41 +38,50 @@ export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python"
 mkdir -p "$CACHE" "$BLOCKDIR" \
     "${NODO_DIR}/docker/data" "${NODO_DIR}/docker/exec" "${DOCKER_CONFIG}"
 
-# cgroup v2: dind needs a writable cgroup tree. In a privileged container/microVM
-# /sys/fs/cgroup is normally already mounted as cgroup2; mount it if not.
-if [ ! -e /sys/fs/cgroup/cgroup.controllers ] && ! mountpoint -q /sys/fs/cgroup; then
-  mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
-fi
-
 # Remove any stale pidfile/socket from a previous boot (e.g. a microVM/container
 # restart) so dockerd doesn't refuse to start with "process N is still running".
 rm -f "${NODO_DIR}/docker/docker.pid" "${NODO_DIR}/docker/docker.sock"
 
-echo "[start] booting in-VM dockerd (vfs) on ${NODO_DIR}/docker/docker.sock ..."
-# --storage-driver=vfs: overlay2 frequently can't mount inside a cloud-hypervisor
-# microVM's root fs; vfs always works (slower/heavier but correct).
-# --iptables=false: the buildx builder runs with --network host (below), so the
-# nested build egresses via the VM's own network and needs no bridge NAT.
-"${NODO_DIR}/bin/dockerd" \
-    --host="unix://${NODO_DIR}/docker/docker.sock" \
-    --data-root="${NODO_DIR}/docker/data" \
-    --exec-root="${NODO_DIR}/docker/exec" \
-    --pidfile="${NODO_DIR}/docker/docker.pid" \
-    --storage-driver=vfs \
-    --iptables=false \
-    >/var/log/dockerd.log 2>&1 &
+start_dockerd() {
+  local storage_driver="$1"
+  echo "[start] booting native dockerd (${storage_driver}) on ${NODO_DIR}/docker/docker.sock ..."
+  "${NODO_DIR}/bin/dockerd" \
+      --host="unix://${NODO_DIR}/docker/docker.sock" \
+      --data-root="${NODO_DIR}/docker/data" \
+      --exec-root="${NODO_DIR}/docker/exec" \
+      --pidfile="${NODO_DIR}/docker/docker.pid" \
+      --storage-driver="${storage_driver}" \
+      >/var/log/dockerd.log 2>&1 &
+}
 
-# Wait for the daemon socket to come up before packing.
-tries=0
-until docker info >/dev/null 2>&1; do
-  tries=$((tries + 1))
-  if [ "$tries" -gt 180 ]; then
+wait_for_dockerd() {
+  local tries=0
+  until docker info >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 90 ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+start_dockerd overlay2
+
+if ! wait_for_dockerd; then
+  echo "[start] dockerd overlay2 startup failed; retrying with vfs fallback." >&2
+  tail -n 40 /var/log/dockerd.log >&2 || true
+  if [ -f "${NODO_DIR}/docker/docker.pid" ]; then
+    kill "$(cat "${NODO_DIR}/docker/docker.pid")" 2>/dev/null || true
+  fi
+  sleep 2
+  rm -f "${NODO_DIR}/docker/docker.pid" "${NODO_DIR}/docker/docker.sock"
+  start_dockerd vfs
+  if ! wait_for_dockerd; then
     echo "[start] dockerd did not become ready in time; last log:" >&2
-    tail -n 60 /var/log/dockerd.log >&2 || true
+    tail -n 80 /var/log/dockerd.log >&2 || true
     exit 1
   fi
-  sleep 1
-done
+fi
 echo "[start] dockerd ready."
 
 # Host-network buildx builder (matches nodo's packer.docker.BUILDX_BUILDER).

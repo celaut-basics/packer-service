@@ -5,9 +5,9 @@
 # microVM whose init runs /app/start.sh.
 #
 # This service does "the same as `nodo pack`" from INSIDE a sealed microVM: it
-# boots its own dockerd (docker-in-docker) and runs `docker buildx build` to
-# compile the image being packed. That nested build is why service.json declares
-# network: tag=(*) (buildx must pull base images).
+# boots its own native dockerd inside the guest and runs `docker buildx build`
+# to compile the image being packed. That nested build is why service.json
+# declares network: tag=(*) (buildx must pull base images).
 #
 # WHY A GLIBC (debian) BASE AND NOT docker:27-dind (alpine):
 #   The packer vendors nodo, whose protobuf stack (bee_rpc's generated *_pb2)
@@ -19,7 +19,7 @@
 #   which needs glibc. The Docker engine itself is static, so we lift its
 #   binaries out of the official docker:27-dind image (pinned by digest).
 
-# ---- stage: official Docker-in-Docker (source of static engine binaries) -----
+# ---- stage: official Docker image (source of static engine binaries) ---------
 FROM docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce AS dind
 
 # ---- runtime: debian (glibc) -------------------------------------------------
