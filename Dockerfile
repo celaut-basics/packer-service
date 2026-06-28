@@ -114,7 +114,11 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version "${CODE_S
 COPY ./ide/SERVICE_CONFIG_GUIDE.md /opt/ide/SERVICE_CONFIG_GUIDE.md
 COPY ./ide/templates /opt/ide/templates
 COPY ./ide/workspace /opt/ide/workspace
-COPY ./ide/bin/new-service ./ide/bin/pack-service /usr/local/bin/
+# NOTE: split into single-source COPYs — nodo's build-context path rewriter
+# only prefixes the FIRST source arg of a multi-source COPY, so a combined
+# `COPY a b /dst/` leaves `b` resolving outside the service/ prefix and fails.
+COPY ./ide/bin/new-service  /usr/local/bin/
+COPY ./ide/bin/pack-service /usr/local/bin/
 RUN chmod +x /usr/local/bin/new-service /usr/local/bin/pack-service
 
 # --- Application --------------------------------------------------------------
