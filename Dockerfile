@@ -4,42 +4,51 @@
 # are declared in service.json. The packed service runs as a cloud-hypervisor
 # microVM whose init runs /app/start.sh.
 #
-# Base = docker-in-docker: this is what lets the packer service do "the same as
-# nodo pack" from *inside* a sealed microVM — it boots its own dockerd and runs
-# `docker buildx build` to compile the image being packed. That nested build is
-# why the service declares network: tag=(*) (buildx must pull base images).
-FROM docker:27-dind
+# This service does "the same as `nodo pack`" from INSIDE a sealed microVM: it
+# boots its own dockerd (docker-in-docker) and runs `docker buildx build` to
+# compile the image being packed. That nested build is why service.json declares
+# network: tag=(*) (buildx must pull base images).
+#
+# WHY A GLIBC (debian) BASE AND NOT docker:27-dind (alpine):
+#   The packer vendors nodo, whose protobuf stack (bee_rpc's generated *_pb2)
+#   requires protobuf's C backend (`google._upb`). protobuf 4.23.3 ships no
+#   musllinux wheel with that extension, so on Alpine `import bee_rpc` dies with
+#   "No module named 'google._upb'". On glibc the manylinux wheel provides it.
+#   We still FORCE pure-python protobuf at runtime (see ENV below) for a stable,
+#   deterministic xattrs-map serialization — but the package must be importable,
+#   which needs glibc. The Docker engine itself is static, so we lift its
+#   binaries out of the official docker:27-dind image (pinned by digest).
 
-# --- Python + the real nodo packer (vendored, not re-implemented) -------------
-# We clone the nodo source so we can invoke its own
-# src/packers/zip_with_dockerfile.py worker; this guarantees the service-id we
-# emit is byte-identical to `nodo pack`.
+# ---- stage: official Docker-in-Docker (source of static engine binaries) -----
+FROM docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce AS dind
+
+# ---- runtime: debian (glibc) -------------------------------------------------
+FROM debian:bookworm-slim
+
 ARG NODO_REF=stable
 ENV NODO_DIR=/opt/nodo \
     PYTHONUNBUFFERED=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
-    # Force pure-python protobuf. protobuf 4.x's default C backend (upb) has no
-    # musllinux wheel here, so `import google._upb` fails on Alpine. More
-    # importantly: protobuf MAP fields (the filesystem xattrs) serialize in a
-    # DIFFERENT byte order under upb vs pure-python, which would change the
-    # service-id. The node packer is pinned to pure-python too (pack_zip injects
-    # this env into its worker), so both sides serialize identically.
+    # Force pure-python protobuf. protobuf MAP fields (the filesystem xattrs)
+    # serialize in a DIFFERENT (and, for upb, time-unstable) byte order under the
+    # C backend vs pure-python, which changes the service-id. The node packer is
+    # pinned to pure-python too (pack_zip injects this into its worker), so both
+    # sides serialize identically and reproducibly.
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
-# NOTE: docker:27-dind's baked python3.12 (3.12.13-r0) was built against a
-# NEWER expat than the Alpine v3.21 repo currently ships: its pyexpat.so
-# references XML_SetAllocTrackerActivationThreshold, a symbol the repo's
-# libexpat lacks, so `import pyexpat` fails and pip (xmlrpc -> expat) is
-# unusable. `apk add python3` is a no-op (already installed) so it keeps the
-# mismatched baked build. Force a full `apk upgrade --available` so python3 AND
-# expat are both reconciled to the same consistent v3.21 snapshot, THEN add the
-# rest and sanity-check pyexpat — all before any pip invocation.
-RUN apk update \
-    && apk upgrade --no-cache --available \
-    && apk add --no-cache \
-        python3 py3-pip git bash tar \
-        build-base python3-dev libffi-dev openssl-dev \
-    && python3 -c "import pyexpat; print('pyexpat ok', pyexpat.EXPAT_VERSION)"
+# nodo resolves its docker tooling under NODO_ROOT (=/opt/nodo): bin/docker,
+# bin/dockerd, libexec/docker/cli-plugins/docker-buildx, and the socket at
+# docker/docker.sock — and RAISES if they're missing. Place the static engine
+# binaries exactly there.
+COPY --from=dind /usr/local/bin/ /opt/nodo/bin/
+COPY --from=dind /usr/local/libexec/ /opt/nodo/libexec/
+
+# DinD runtime support tools (glibc side): iptables/iproute2 for networking,
+# kmod for modprobe, e2fsprogs/xfsprogs for storage, pigz/xz for layer (de)compress.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev build-essential git ca-certificates \
+        iptables iproute2 kmod e2fsprogs xfsprogs pigz xz-utils openssl uidmap \
+    && rm -rf /var/lib/apt/lists/*
 
 # Vendor the nodo tree (packer + its src.utils / protos / bee_rpc deps).
 RUN git clone --depth 1 --branch "${NODO_REF}" \
@@ -47,12 +56,11 @@ RUN git clone --depth 1 --branch "${NODO_REF}" \
 
 # Determinism patches (REQUIRED so this service's ids match `nodo pack` on a
 # patched node, and so packing the same project twice yields the same id).
-# Upstream nodo's packer is nondeterministic for two reasons:
-#   1. recursive_parsing iterates os.listdir() UNSORTED, so filesystem branch
-#      order (hence the serialized bytes) varies between two extractions of the
-#      same image tar.
+# Upstream nodo's packer is nondeterministic two ways:
+#   1. recursive_parsing iterates os.listdir() UNSORTED -> filesystem branch
+#      order (hence serialized bytes) varies between extractions of the same tar.
 #   2. it hashes mtime_ns, but tar extraction reassigns SYMLINK mtimes to the
-#      current wall-clock time, so the id changes every pack.
+#      current wall-clock time -> the id changes every pack.
 # Both are content-irrelevant; normalise them. (Report upstream.)
 RUN sed -i \
         's/for b_name in os.listdir(host_dir + directory):/for b_name in sorted(os.listdir(host_dir + directory)):/' \
@@ -69,18 +77,12 @@ RUN sed -i \
 # imports — NOT nodo's full requirements (those drag in the Ergo payment stack:
 # ergpy/jpype1/coincurve/bip32/mnemonic, which need a JVM + libsecp256k1 and are
 # never imported by the packer).
-#
-# Two pins matter for a byte-identical service-id:
-#   * protobuf==4.23.3 — the metadata serializer; matches the node's runtime and
-#     the protoc that generated nodo's vendored protos/*_pb2.py.
+#   * protobuf==4.23.3 — matches the node's runtime + the protoc that generated
+#     nodo's vendored protos/*_pb2.py.
 #   * bee_rpc @ the exact git commit the node uses — owns the multiblock/.bee
-#     block format that the id is hashed over.
-# bee_rpc HARD-pins grpcio==1.56.0 + protobuf==4.23.3 in its metadata, but
-# grpcio 1.56.0 has no cp312/musllinux wheel and would force a slow, fragile
-# source build. grpcio is only the block-streaming transport underneath bee_rpc
-# — it contributes no bytes to the hashed content — so we install bee_rpc with
-# --no-deps and supply a wheel-shipping grpcio ourselves, while keeping protobuf
-# pinned exactly.
+#     block format the id is hashed over. Installed --no-deps so we control
+#     protobuf/grpcio (bee_rpc hard-pins grpcio==1.56.0, which has no wheel here;
+#     grpcio is only the streaming transport and contributes no hashed bytes).
 RUN pip3 install --no-cache-dir \
         "protobuf==4.23.3" "grpcio" \
         "docker==6.1.3" requests requests-unixsocket "PyYAML==6.0.1" \
