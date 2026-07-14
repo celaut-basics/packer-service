@@ -23,8 +23,8 @@ from src.utils.verify import calculate_hashes, calculate_hashes_by_stream
 from src.manager.resources import IOBigData
 
 
-CACHE = "__cache__"
-BLOCKDIR = "__blocks__"
+CACHE = os.path.abspath(os.environ.get("CACHE", "__cache__")) + os.sep
+BLOCKDIR = os.path.abspath(os.environ.get("BLOCKDIR", "__blocks__")) + os.sep
 PACKER_MEMORY_SIZE_FACTOR = 2.0
 MIN_BUFFER_BLOCK_SIZE = 10 * 1024 * 1024  # 10MB
 BUILDX_NETWORK = "host"

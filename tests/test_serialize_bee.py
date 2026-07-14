@@ -22,7 +22,10 @@ from contextlib import contextmanager
 # the sibling test module's module-level env contract).
 _TMP = tempfile.mkdtemp(prefix="packer-bee-test-")
 os.environ.setdefault("CACHE", os.path.join(_TMP, "cache"))
+# Other test modules may have installed the production default first.
+os.environ["BLOCKDIR"] = os.path.join(_TMP, "blocks")
 os.makedirs(os.environ["CACHE"], exist_ok=True)
+os.makedirs(os.environ["BLOCKDIR"], exist_ok=True)
 
 import server  # noqa: E402
 
@@ -54,10 +57,13 @@ def _stub_nodo_deps(recorder):
         recorder["indices"] = indices
         # Capture on-disk block contents NOW — `_serialize_bee` rmtree's its
         # scratch dir on return, so the metadata file won't exist afterwards.
-        recorder["block_contents"] = [
-            open(b.dir, "rb").read() if os.path.isfile(b.dir) else None
-            for b in blocks
-        ]
+        recorder["block_contents"] = []
+        for block in blocks:
+            if os.path.isfile(block.dir):
+                with open(block.dir, "rb") as block_file:
+                    recorder["block_contents"].append(block_file.read())
+            else:
+                recorder["block_contents"].append(None)
         out = os.path.join(path, f"{file_name}.{extension}")
         with open(out, "wb") as f:
             f.write(b"FAKEBEE")
@@ -68,7 +74,14 @@ def _stub_nodo_deps(recorder):
     bee_client = types.ModuleType("bee_rpc.client")
     bee_client.write_to_file = fake_write_to_file
     bee_client.Dir = _FakeDir
+    bee_utils = types.ModuleType("bee_rpc.utils")
+
+    def fake_modify_env(**kwargs):
+        recorder["env"] = kwargs
+
+    bee_utils.modify_env = fake_modify_env
     bee_pkg.client = bee_client
+    bee_pkg.utils = bee_utils
 
     protos_pkg = types.ModuleType("protos")
     celaut = types.ModuleType("protos.celaut_pb2")
@@ -79,6 +92,7 @@ def _stub_nodo_deps(recorder):
     injected = {
         "bee_rpc": bee_pkg,
         "bee_rpc.client": bee_client,
+        "bee_rpc.utils": bee_utils,
         "protos": protos_pkg,
         "protos.celaut_pb2": celaut,
     }
@@ -105,6 +119,13 @@ class SerializeBeeTests(unittest.TestCase):
 
         # Framed as {1: Metadata, 2: Service}.
         self.assertEqual(rec["indices"], {1: _FakeMetadata, 2: _FakeService})
+        self.assertEqual(
+            rec["env"],
+            {
+                "cache_dir": os.path.abspath(os.environ["CACHE"]) + os.sep,
+                "block_dir": os.path.abspath(os.environ["BLOCKDIR"]) + os.sep,
+            },
+        )
 
         # Two blocks, metadata first then the service dir.
         blocks = rec["blocks"]

@@ -423,7 +423,17 @@ def _serialize_bee(service_dir: str, metadata_bytes: bytes) -> bytes:
     # (e.g. for unit-testing the HTTP layer on a dev box).
     sys.path.insert(0, NODO_DIR)
     from bee_rpc.client import write_to_file, Dir  # type: ignore
+    from bee_rpc.utils import modify_env  # type: ignore
     from protos import celaut_pb2  # type: ignore
+
+    # The packer runs in a child process.  bee_rpc keeps its cache/block roots
+    # in process-local class attributes, so the worker's modify_env() call is
+    # not inherited here.  Configure the writer explicitly; otherwise it uses
+    # cwd/__block__/ and can emit block markers without being able to read the
+    # corresponding payloads produced by the worker.
+    cache_dir = os.path.abspath(os.environ["CACHE"]) + os.sep
+    block_dir = os.path.abspath(os.environ["BLOCKDIR"]) + os.sep
+    modify_env(cache_dir=cache_dir, block_dir=block_dir)
 
     work = tempfile.mkdtemp(prefix="bee-", dir=os.environ["CACHE"])
     try:
