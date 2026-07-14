@@ -85,17 +85,24 @@ RUN grep -q 'sorted(os.listdir(host_dir + directory))' \
 # never imported by the packer).
 #   * protobuf==4.23.3 — matches the node's runtime + the protoc that generated
 #     nodo's vendored protos/*_pb2.py.
-#   * bee_rpc @ the exact git commit the node uses — owns the multiblock/.bee
-#     block format the id is hashed over. Installed --no-deps so we control
-#     protobuf/grpcio (bee_rpc hard-pins grpcio==1.56.0, which has no wheel here;
-#     grpcio is only the streaming transport and contributes no hashed bytes).
+#   * bee_rpc — owns the multiblock/.bee block format the id is hashed over.
+#     Pinned to the backend-agnostic block-detection commit: block traversal
+#     must detect repeated-message fields via the field DESCRIPTOR
+#     (LABEL_REPEATED + TYPE_MESSAGE), NOT isinstance on google._upb's
+#     RepeatedCompositeContainer. The packer forces pure-python protobuf (below),
+#     under which the upb container class never matches, so nested block pointers
+#     inside repeated fields (Filesystem.branch) were silently dropped and >=10MiB
+#     payloads never got embedded in the .bee. See bee-rpc PR #4.
+#     Installed --no-deps so we control protobuf/grpcio (bee_rpc hard-pins
+#     grpcio==1.56.0, which has no wheel here; grpcio is only the streaming
+#     transport and contributes no hashed bytes).
 RUN pip3 install --no-cache-dir \
         "protobuf==4.23.3" "grpcio" \
         "docker==6.1.3" requests requests-unixsocket "PyYAML==6.0.1" \
         "python-dotenv==1.0.0" psutil netifaces2 tabulate packaging \
         typing_extensions six mnemonic \
     && pip3 install --no-cache-dir --no-deps \
-        "git+https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-py@7a2a344bc29546328bcf2f753dc2407f2c226376" \
+        "git+https://github.com/agenticaihome/bee-rpc-over-grpc-py@00abf19f14cf7d423c75fe2183f6b5d87f87e4e4" \
     && python3 -c "from bee_rpc import client; import google.protobuf; from google.protobuf.internal import api_implementation as a; assert a.Type()=='python', 'expected pure-python protobuf, got '+a.Type(); print('deps ok, protobuf', google.protobuf.__version__, a.Type())"
 
 # No config.yaml. A config file makes sense on a full nodo, but not for a
