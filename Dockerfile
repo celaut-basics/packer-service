@@ -92,7 +92,10 @@ RUN grep -q 'sorted(os.listdir(host_dir + directory))' \
 #     RepeatedCompositeContainer. The packer forces pure-python protobuf (below),
 #     under which the upb container class never matches, so nested block pointers
 #     inside repeated fields (Filesystem.branch) were silently dropped and >=10MiB
-#     payloads never got embedded in the .bee. See bee-rpc PR #4.
+#     payloads never got embedded in the .bee. The descriptor check also excludes
+#     protobuf map entries (Filesystem.branch[].xattrs is a map<string,bytes>),
+#     which would otherwise be mis-detected as repeated messages and crash the
+#     traversal. See bee-rpc PR #4.
 #     Installed --no-deps so we control protobuf/grpcio (bee_rpc hard-pins
 #     grpcio==1.56.0, which has no wheel here; grpcio is only the streaming
 #     transport and contributes no hashed bytes).
@@ -102,7 +105,7 @@ RUN pip3 install --no-cache-dir \
         "python-dotenv==1.0.0" psutil netifaces2 tabulate packaging \
         typing_extensions six mnemonic \
     && pip3 install --no-cache-dir --no-deps \
-        "git+https://github.com/agenticaihome/bee-rpc-over-grpc-py@00abf19f14cf7d423c75fe2183f6b5d87f87e4e4" \
+        "git+https://github.com/agenticaihome/bee-rpc-over-grpc-py@cfc527a3913bd90b1e85906133b3cbbce52cb63a" \
     && python3 -c "from bee_rpc import client; import google.protobuf; from google.protobuf.internal import api_implementation as a; assert a.Type()=='python', 'expected pure-python protobuf, got '+a.Type(); print('deps ok, protobuf', google.protobuf.__version__, a.Type())"
 
 # No config.yaml. A config file makes sense on a full nodo, but not for a
