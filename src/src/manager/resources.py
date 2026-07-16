@@ -29,6 +29,94 @@ mem_manager = lambda len, timeout=None: IOBigData().lock(len=len, timeout=timeou
 
 PREVENT_KILL_WAIT_TIME = 5 # seconds
 
+# service.json reserves only 0.5 GB of RAM up front (at_init == at_most). When a
+# pack needs more than the currently-locked amount, the packer asks its own nodo
+# — the authority — to hotplug extra RAM into this microVM instead of failing
+# against the (older, static) system-available accounting. The node file below
+# is the serialized celaut.ConfigurationFile mounted by nodo inside the guest; it
+# carries the Gateway Instance we call back on.
+NODE_CONFIG_FILE = os.environ.get("PACKER_CONFIG_FILE", "/__config__")
+# Extra RAM requested above the strict need, so a grow doesn't land exactly on
+# the edge and immediately need another round-trip.
+GROW_HEADROOM_BYTES = int(os.environ.get("PACKER_GROW_HEADROOM_BYTES", 128 * 1024 * 1024))
+
+
+class NodeResourceManager:
+    """Client-side mirror of celaut-project/libraries ``ResourceManager``.
+
+    The libraries package is not vendored/importable inside this fork, so this
+    reproduces the one call the packer needs: ``modify_resources(min, max) ->
+    granted`` backed by the Gateway ``ModifyServiceSystemResources`` RPC
+    (``ModifyServiceSystemResourcesInput{min_sysreq, max_sysreq}`` ->
+    ``ModifyServiceSystemResourcesOutput{sysreq, gas}``). The node identifies the
+    caller by its microVM IP and hotplugs the granted memory; the new capacity
+    then shows up in psutil's system-available accounting used by
+    ``IOBigData.ram_pool``.
+
+    It is a no-op (returns ``None``) when there is no gateway to reach — e.g. on
+    a dev box, in unit tests, or when bee_rpc/protos are unavailable — so the
+    original static locker behaviour is preserved verbatim.
+    """
+
+    def __init__(self, config_file: str = NODE_CONFIG_FILE, log=lambda message: print(message)) -> None:
+        self._config_file = config_file
+        self._log = log
+        self._gateway_uri: Optional[str] = None
+        self._resolved = False
+
+    def _resolve_gateway(self) -> Optional[str]:
+        if self._resolved:
+            return self._gateway_uri
+        self._resolved = True
+        try:
+            if not self._config_file or not os.path.exists(self._config_file):
+                return None
+            cfg = celaut_pb2.ConfigurationFile()
+            with open(self._config_file, "rb") as f:
+                cfg.ParseFromString(f.read())
+            for slot in cfg.gateway.uri_slot:
+                for uri in slot.uri:
+                    if uri.ip and uri.port:
+                        self._gateway_uri = f"{uri.ip}:{uri.port}"
+                        return self._gateway_uri
+        except Exception as e:
+            self._log(f"[MEM] could not resolve gateway for modify_resources: {e}")
+        return None
+
+    def modify_resources(self, min_bytes: int, max_bytes: Optional[int] = None) -> Optional[int]:
+        """Ask the node to (re)size this microVM's memory. Returns the granted
+        ``mem_limit`` in bytes, or ``None`` when no request could be made."""
+        uri = self._resolve_gateway()
+        if not uri:
+            return None
+        if max_bytes is None:
+            max_bytes = min_bytes
+        try:
+            import grpc
+            from bee_rpc import client as grpcbb
+            from protos import celaut_pb2_grpc
+            stub = celaut_pb2_grpc.GatewayStub(grpc.insecure_channel(uri))
+            output = next(grpcbb.client_grpc(
+                method=stub.ModifyServiceSystemResources,
+                input=celaut_pb2.ModifyServiceSystemResourcesInput(
+                    min_sysreq=celaut_pb2.Sysresources(mem_limit=int(min_bytes)),
+                    max_sysreq=celaut_pb2.Sysresources(mem_limit=int(max_bytes)),
+                ),
+                indices_parser=celaut_pb2.ModifyServiceSystemResourcesOutput,
+                partitions_message_mode_parser=True,
+            ), None)
+            if output is None:
+                return None
+            granted = int(output.sysreq.mem_limit)
+            self._log(
+                f"[MEM] node granted mem_limit={IOBigData.convert_size(granted)} "
+                f"(requested min={IOBigData.convert_size(min_bytes)})"
+            )
+            return granted
+        except Exception as e:
+            self._log(f"[MEM] modify_resources call failed: {e}")
+            return None
+
 class IOBigData(metaclass=Singleton):
     class RamLocker(object):
         def __init__(self, len, iobd, timeout=None):
@@ -50,7 +138,8 @@ class IOBigData(metaclass=Singleton):
 
     def __init__(self,
                  log=lambda message: print(message),
-                 ram_pool_method=None
+                 ram_pool_method=None,
+                 resource_manager=None
                  ) -> None:
 
         self._initial_python_rss_bytes = _python_rss_bytes()  # Consumo del intérprete de python al iniciar el proceso, tomado como referencia de uso base para evitar el doble conteo con ram_locked. Se considera que esto es lo que gasta fuera del locked.
@@ -70,17 +159,49 @@ class IOBigData(metaclass=Singleton):
         self.ram_pool = ram_pool_method if ram_pool_method is not None else default_ram_pool
 
         self.log = log
-        self.ram_locked = 0  
+        self.ram_locked = 0
         self.get_ram_avaliable = lambda: self.ram_pool() - self.ram_locked
         self.amount_lock = RLock()
 
         self.waiting_bytes = 0
         self.wait_lock = Lock()
 
+        # Node-authority growth: when the static pool can't cover a lock, ask the
+        # node to hotplug more RAM. Defaults to the real gateway-backed manager,
+        # which no-ops when no gateway/config is reachable (dev boxes, tests).
+        self.resource_manager = resource_manager if resource_manager is not None else NodeResourceManager(log=log)
+        self._last_growth_target = 0  # largest mem_limit already requested from the node
+
     # General methods.
 
     def set_log(self, log=lambda message: print(message)) -> None:
         self.log = log
+        if isinstance(getattr(self, "resource_manager", None), NodeResourceManager):
+            self.resource_manager._log = log
+
+    def set_resource_manager(self, resource_manager) -> None:
+        self.resource_manager = resource_manager
+
+    def _request_growth(self, ram_amount: int) -> None:
+        """When the static pool can't satisfy ``ram_amount``, ask the node (the
+        authority) to hotplug more RAM into this microVM. No-op when no manager
+        or gateway is available, which leaves the original static wait/fail
+        behaviour untouched."""
+        rm = self.resource_manager
+        if rm is None:
+            return
+        with self.amount_lock:
+            # Total the daemon must hold at once: everything already locked, plus
+            # this request, plus a little headroom.
+            needed_total = self.ram_locked + ram_amount + GROW_HEADROOM_BYTES
+        if needed_total <= self._last_growth_target:
+            return  # already asked the node for at least this much this run
+        self._last_growth_target = needed_total
+        self.log(f"[MEM] static pool short for {IOBigData.convert_size(ram_amount)}; "
+                 f"requesting node grow to {IOBigData.convert_size(needed_total)}")
+        granted = rm.modify_resources(needed_total, needed_total)
+        if granted is not None:
+            self.log_snapshot(context=f"after-modify-resources granted={granted}")
 
     @staticmethod
     def convert_size(size_bytes):
@@ -176,6 +297,12 @@ class IOBigData(metaclass=Singleton):
         try:
             while True:
                 self.__stats('go to lock ' + IOBigData.convert_size(ram_amount))
+                # The declared 0.5 GB reservation is only a floor. If the static
+                # pool can't cover this lock, ask the node to hotplug more RAM
+                # before we block/fail against the older static accounting.
+                if not self.__can_lock_ram(ram_amount=ram_amount, inclusive=True):
+                    self._request_growth(ram_amount)
+
                 if wait:
                     self.wait_to_prevent_kill(len=ram_amount, deadline=deadline)
 
