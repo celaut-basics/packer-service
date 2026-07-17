@@ -66,6 +66,16 @@ curl -sS -D - -o /tmp/hello.celaut.bee \
 Packing the same project twice yields the **same** `X-Service-Id` — that
 reproducibility is the whole point.
 
+## To pack the self repo
+
+```bash
+zip -r /tmp/packer.zip src ide start.sh pack_config.json service.json server.py Dockerfile
+curl -sS -D - -o /tmp/packer.celaut.bee \
+  --data-binary @/tmp/packer.zip \
+  -H "Content-Type: application/zip" \
+  http://localhost:8080/pack
+```
+
 ### Browser IDE (optional)
 
 Open <http://localhost:8443> for a full VS Code in the browser (code-server) with
